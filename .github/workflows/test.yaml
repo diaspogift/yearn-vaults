@@ -22,21 +22,19 @@ jobs:
           ~/.vvm
         key: compiler-cache
 
-    - name: Cache compiler installations
+    - name: Cache Brownie Build Folders
       uses: actions/cache@v2
       with:
         path: |
-          ~/.solcx
-          ~/.vvm
-        key: ${{ runner.os }}-compiler-cache
+          ~/.brownie
+          ./build
+        key: build-cache
 
     - name: Setup node.js
       uses: actions/setup-node@v1
-      with:
-        node-version: '12.x'
 
     - name: Install ganache
-      run: npm install -g ganache-cli@6.11
+      run: npm install -g ganache-cli@6.12.1
 
     - name: Set up python 3.8
       uses: actions/setup-python@v2
@@ -82,21 +80,19 @@ jobs:
           ~/.vvm
         key: compiler-cache
 
-    - name: Cache compiler installations
+    - name: Cache Brownie Build Folders
       uses: actions/cache@v2
       with:
         path: |
-          ~/.solcx
-          ~/.vvm
-        key: ${{ runner.os }}-compiler-cache
+          ~/.brownie
+          ./build
+        key: build-cache
 
     - name: Setup node.js
       uses: actions/setup-node@v1
-      with:
-        node-version: '12.x'
 
     - name: Install ganache
-      run: npm install -g ganache-cli@6.11
+      run: npm install -g ganache-cli@6.12.1
 
     - name: Set up python 3.8
       uses: actions/setup-python@v2
