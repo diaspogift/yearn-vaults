@@ -92,6 +92,8 @@ struct StrategyParams:
     totalDebt: uint256  # Total outstanding debt that Strategy has
     totalGain: uint256  # Total returns that Strategy has realized for Vault
     totalLoss: uint256  # Total losses that Strategy has realized for Vault
+    apy12dEMA: decimal  # Annual percentage yield (12d EMA)
+    apy50dEMA: decimal  # Annual percentage yield (50d EMA)
 
 
 event StrategyAdded:
@@ -132,6 +134,8 @@ depositLimit: public(uint256)  # Limit for totalAssets the Vault can hold
 debtLimit: public(uint256)  # Debt limit for the Vault across all strategies
 totalDebt: public(uint256)  # Amount of tokens that all strategies have borrowed
 lastReport: public(uint256)  # Number of blocks since last report
+apy12dEMA: public(decimal)  # Annual percentage yield (12d EMA)
+apy50dEMA: public(decimal)  # Annual percentage yield (50d EMA)
 
 rewards: public(address)  # Rewards contract where Governance fees are sent to
 # Governance Fee for management of Vault (given to `rewards`)
@@ -863,6 +867,8 @@ def addStrategy(
         totalDebt: 0,
         totalGain: 0,
         totalLoss: 0,
+        apy12dEMA: 0.0,
+        apy50dEMA: 0.0,
     })
     self.debtLimit += _debtLimit
     log StrategyAdded(_strategy, _debtLimit, _rateLimit, _performanceFee)
@@ -1158,6 +1164,18 @@ def expectedReturn(_strategy: address = msg.sender) -> uint256:
     return self._expectedReturn(_strategy)
 
 
+@pure
+@internal
+def _computeEMA(
+    _currentReading: decimal,
+    _previousReading: decimal,
+    _observationPeriodLength: decimal,
+) -> decimal:
+    # measure the N-day EMA of the strategy's return
+    smoothingFactor: decimal = 2.0 / (_observationPeriodLength + 1.0)
+    return _previousReading + smoothingFactor * (_currentReading - _previousReading)
+
+
 @external
 def report(_gain: uint256, _loss: uint256) -> uint256:
     """
@@ -1198,6 +1216,11 @@ def report(_gain: uint256, _loss: uint256) -> uint256:
             loss,
             self.strategies[msg.sender].debtLimit,
         )
+
+    # Use this for APY metrics
+    # NOTE: Need this now before any adjustments occur
+    prevDebt: decimal = convert(self.strategies[msg.sender].totalDebt, decimal)
+    prevTotalDebt: decimal = convert(self.totalDebt, decimal)
 
     # Outstanding debt the Vault wants to take back from the Strategy (if any)
     debt: uint256 = self._debtOutstanding(msg.sender)
@@ -1287,6 +1310,47 @@ def report(_gain: uint256, _loss: uint256) -> uint256:
         self.strategies[msg.sender].totalGain += _gain
 
     # else, no credit/debt to manage, nor returns to report. Nothing really happened!
+
+    # NOTE: This is after returns are bookkept, but before reporting time is updated
+    realizedReturn: decimal = convert(self._expectedReturn(msg.sender), decimal)
+    # Adjust by estimated number of harvests per year
+    realizedReturn *= (
+        convert(BLOCKS_PER_YEAR, decimal)
+        / convert(block.number - self.strategies[msg.sender].lastReport, decimal)
+    )
+    # Normalize to total debt (using debt from the period the return was generated)
+    if prevDebt != 0.0:
+        realizedReturn /= prevDebt
+    else:
+        realizedReturn = 0.0
+    prev_apy12dEMA: decimal = self.strategies[msg.sender].apy12dEMA
+    prev_apy50dEMA: decimal = self.strategies[msg.sender].apy50dEMA
+    nextDebt: decimal = convert(self.strategies[msg.sender].totalDebt, decimal)
+    nextTotalDebt: decimal = convert(self.totalDebt, decimal)
+
+    # Update Strategy Metrics
+    # NOTE: Block delta can't ever be 0
+    next_apy12dEMA: decimal = self._computeEMA(
+        realizedReturn,
+        prev_apy12dEMA,
+        12.0,
+    )
+    next_apy50dEMA: decimal = self._computeEMA(
+        realizedReturn,
+        prev_apy50dEMA,
+        50.0,
+    )
+    self.strategies[msg.sender].apy12dEMA = next_apy12dEMA
+    self.strategies[msg.sender].apy50dEMA = next_apy50dEMA
+
+    # Updated debt-weight total Vault Metrics
+    # NOTE: Adjusts a ratio by a ratio, should not revert as long as totalDebt < 1e38
+    if nextTotalDebt != 0.0:
+        self.apy12dEMA += next_apy12dEMA * (nextDebt / nextTotalDebt)
+        self.apy50dEMA += next_apy50dEMA * (nextDebt / nextTotalDebt)
+    if prevTotalDebt != 0.0:
+        self.apy12dEMA -= prev_apy12dEMA * (prevDebt / prevTotalDebt)
+        self.apy50dEMA -= prev_apy50dEMA * (prevDebt / prevTotalDebt)
 
     # Update reporting time
     self.strategies[msg.sender].lastReport = block.number
