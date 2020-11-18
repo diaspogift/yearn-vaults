@@ -1,8 +1,12 @@
-from brownie import accounts, network, interface, Vault
+from brownie import accounts, network, interface, Vault, Token
+from brownie.network.gas.strategies import GasNowScalingStrategy
 from decimal import Decimal
 from eth_utils import is_checksum_address
 import requests
 from time import sleep
+
+
+gas_strategy = GasNowScalingStrategy()
 
 
 def get_address(msg: str) -> str:
@@ -11,13 +15,6 @@ def get_address(msg: str) -> str:
         if is_checksum_address(addr):
             return addr
         print(f"I'm sorry, but '{addr}' is not a checksummed address")
-
-
-def get_gas_price(confirmation_speed: str = "fast"):
-    if "mainnet" not in network.show_active():
-        return 10 ** 9  # 1 gwei
-    data = requests.get("https://www.gasnow.org/api/v3/gas/price").json()
-    return data["data"][confirmation_speed]
 
 
 def main():
@@ -30,6 +27,7 @@ def main():
         strategies.append(interface.StrategyAPI(get_address("Strategy to farm: ")))
 
     vault = Vault.at(strategies[0].vault())
+    want = Token.at(vault.token())
 
     for strategy in strategies:
         assert (
@@ -38,37 +36,51 @@ def main():
         assert strategy.vault() == vault.address, "Vault mismatch! [{strategy.address}]"
 
     while True:
-        gas_price = get_gas_price()
         starting_balance = bot.balance()
 
-        no_action = True
+        calls_made = 0
         for strategy in strategies:
             # Display some relevant statistics
-            symbol = vault.symbol()[1:]
+            symbol = want.symbol()
             credit = vault.creditAvailable(strategy) / 10 ** vault.decimals()
             print(f"[{strategy.address}] Credit Available: {credit:0.3f} {symbol}")
             debt = vault.debtOutstanding(strategy) / 10 ** vault.decimals()
             print(f"[{strategy.address}] Debt Outstanding: {debt:0.3f} {symbol}")
 
-            # TODO: Actually estimate gas
-            if strategy.tendTrigger(40000 * gas_price):
+            if strategy.tendTrigger(
+                strategy.tend.estimate_gas() * gas_strategy.get_gas_price()
+            ):
                 try:
-                    strategy.tend({"from": bot, "gas_price": gas_price})
-                    no_action = False
+                    strategy.tend({"from": bot, "gas_price": gas_strategy})
+                    calls_made += 1
                 except:
                     print("Call failed")
 
-            elif strategy.harvestTrigger(180000 * gas_price):
+            elif strategy.harvestTrigger(
+                strategy.harvest.estimate_gas() * gas_strategy.get_gas_price()
+            ):
                 try:
-                    strategy.harvest({"from": bot, "gas_price": gas_price})
-                    no_action = False
+                    strategy.harvest({"from": bot, "gas_price": gas_strategy})
+                    calls_made += 1
                 except:
                     print("Call failed")
 
-        if no_action:
+        if calls_made > 0:
+            gas_cost = (bot.balance() - starting_balance) / 10 ** 18
+            print(f"Made {calls_made} calls, spent {gas_cost} on gas.")
+            print(
+                f"At this rate, it'll take {bot.balance() // gas_cost} harvests to run out of gas."
+            )
+        else:
             print("Sleeping for 60 seconds...")
             sleep(60)
 
-        if bot.balance() < 10 ** 8 * gas_price:
-            # Less than 100m gas left to spend
+        if (
+            bot.balance()
+            < 3  # harvests per strategy
+            * len(strategies)
+            * strategy.harvest.estimate_gas()
+            * gas_strategy.get_gas_price()
+        ):
+            # Less than 3 total harvests left until empty tank!
             print(f"Need more ether please! {bot.address}")
